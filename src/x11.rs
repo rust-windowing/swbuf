@@ -5,16 +5,16 @@
 //! addition, we may also want to blit to a pixmap instead of a window.
 
 use crate::SwBufError;
-use nix::libc::{shmget, shmat, IPC_PRIVATE, shmctl, shmdt, IPC_RMID};
+use nix::libc::{shmat, shmctl, shmdt, shmget, IPC_PRIVATE, IPC_RMID};
 use raw_window_handle::{XlibDisplayHandle, XlibWindowHandle};
 
 use std::io;
 use std::mem;
 use std::os::raw::{c_char, c_uint};
-use std::ptr::{null_mut, NonNull};
+use std::ptr::{copy_nonoverlapping, null_mut, NonNull};
 
 use x11_dl::xlib::{Display, Visual, Xlib, ZPixmap, GC};
-use x11_dl::xshm::{Xext as XShm, XShmSegmentInfo};
+use x11_dl::xshm::{XShmSegmentInfo, Xext as XShm};
 
 /// The handle to an X11 drawing context.
 pub struct X11Impl {
@@ -108,7 +108,7 @@ impl X11Impl {
         // See if we can load the XShm extension.
         let xshm = XShm::open()
             .ok()
-            .filter(|shm| (shm.XShmQueryExtension)(display_handle.display as *mut Display) != 0);
+            .filter(|shm| (shm.XShmQueryExtension)(display_handle.display as *mut Display) == 0);
 
         Ok(Self {
             window_handle,
@@ -122,7 +122,8 @@ impl X11Impl {
     }
 
     pub(crate) unsafe fn set_buffer(&mut self, buffer: &[u32], width: u16, height: u16) {
-        if self.shm_set(buffer, width, height).is_err() {
+        if let Err(e) = self.shm_set(buffer, width, height) {
+            eprintln!("XShm not available, falling back to XImage: {e}");
             self.fallback_set(buffer, width, height);
         }
     }
@@ -161,6 +162,31 @@ impl X11Impl {
             width as u32,
             height as u32,
         );
+
+        // Populate the SHM segment with our buffer.
+        copy_nonoverlapping(buffer.as_ptr() as *mut i8, shmseg.ptr.as_ptr(), shmseg_size);
+        seg.shmid = shmseg.id;
+        seg.shmaddr = shmseg.ptr.as_ptr();
+        (shm_ext.xshm.XShmAttach)(self.display_handle.display as *mut Display, &mut seg);
+
+        // Put the image on the window.
+        (shm_ext.xshm.XShmPutImage)(
+            self.display_handle.display as *mut Display,
+            self.window_handle.window,
+            self.gc,
+            image,
+            0,
+            0,
+            0,
+            0,
+            width as u32,
+            height as u32,
+            0,
+        );
+
+        // Detach the segment and destroy the image.
+        (shm_ext.xshm.XShmDetach)(self.display_handle.display as *mut Display, &mut seg);
+        (self.xlib.XDestroyImage)(image);
 
         Ok(())
     }
@@ -221,11 +247,7 @@ impl ShmSegment {
                 }
             };
 
-            Ok(Self {
-                id,
-                ptr,
-                size,
-            })
+            Ok(Self { id, ptr, size })
         }
     }
 }
