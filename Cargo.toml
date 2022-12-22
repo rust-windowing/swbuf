@@ -15,7 +15,7 @@ exclude = ["examples"]
 default = ["x11", "wayland", "wayland-dlopen"]
 wayland = ["wayland-backend", "wayland-client", "nix"]
 wayland-dlopen = ["wayland-sys/dlopen"]
-x11 = ["x11-dl"]
+x11 = ["nix", "x11-dl"]
 
 [dependencies]
 thiserror = "1.0.30"
